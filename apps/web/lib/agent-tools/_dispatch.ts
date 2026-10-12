@@ -24,6 +24,7 @@
  */
 
 import type { HandlerContext, HandlerResult } from "@nexus/identity-and-access";
+import { handleCheckGbpConnectionHealth } from "./check_gbp_connection_health";
 import { handleFetchLocalRankPositions } from "./fetch_local_rank_positions";
 import { handlePublishGbpPost } from "./publish_gbp_post";
 import { handlePublishReviewReply } from "./publish_review_reply";
@@ -36,6 +37,7 @@ export const DOMAIN_DISPATCH: Record<
   (ctx: HandlerContext, args: Args) => Promise<HandlerResult>
 > = {
   // Build agent appends entries here per CTO-declared new_domain_tool.
+  check_gbp_connection_health: (ctx, a) => handleCheckGbpConnectionHealth(ctx, a),
   fetch_local_rank_positions: (ctx, a) => handleFetchLocalRankPositions(ctx, a),
   publish_gbp_post: (ctx, a) => handlePublishGbpPost(ctx, a),
   publish_review_reply: (ctx, a) => handlePublishReviewReply(ctx, a),
