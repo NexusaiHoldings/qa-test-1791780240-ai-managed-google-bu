@@ -1,91 +1,77 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getAdminUser } from "@nexus/admin-console";
 import {
-  createTemplate,
-  listTemplateLibrary,
-  updateTemplate,
-  upsertKeywordSeed,
-  type TemplateCreateInput,
-  type TemplateUpdateInput,
+  ensureTemplateAndKeywordSeeds,
+  listTemplates,
+  toggleTemplateActive,
+  upsertTemplate,
+  type GbpSeason,
+  type GbpTrade,
 } from "@/lib/gbp/templates";
 
-function parseBoolean(value: FormDataEntryValue | null): boolean {
-  if (typeof value !== "string") return false;
-  return value === "on" || value === "true" || value === "1";
+function forbidden(): NextResponse {
+  return NextResponse.json({ error: "forbidden" }, { status: 403 });
 }
 
-export async function GET(request: Request): Promise<Response> {
-  const admin = await getAdminUser();
-  if (!admin) {
-    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return fallback;
+}
+
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const adminUser = await getAdminUser();
+  if (!adminUser) {
+    return forbidden();
   }
 
   const { searchParams } = new URL(request.url);
-  const q = searchParams.get("q") ?? "";
-  const trade = searchParams.get("trade") ?? "";
-  const season = searchParams.get("season") ?? "";
-  const activeParam = searchParams.get("active");
-  const active =
-    activeParam === "true" ? true : activeParam === "false" ? false : undefined;
+  const trade = (searchParams.get("trade") ?? "all") as GbpTrade | "all";
+  const season = (searchParams.get("season") ?? "all") as GbpSeason | "all";
+  const active = (searchParams.get("active") ?? "all") as "all" | "active" | "inactive";
+  const query = searchParams.get("query") ?? "";
 
-  const templates = await listTemplateLibrary({ q, trade, season, active });
+  const templates = await listTemplates({ trade, season, active, query });
   return NextResponse.json({ templates });
 }
 
-export async function POST(request: Request): Promise<Response> {
-  const admin = await getAdminUser();
-  if (!admin) {
-    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const adminUser = await getAdminUser();
+  if (!adminUser) {
+    return forbidden();
   }
 
-  const contentType = request.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json")) {
-    const payload = (await request.json()) as Record<string, unknown>;
-    if (payload.intent === "seed-keyword") {
-      await upsertKeywordSeed({
-        trade: String(payload.trade ?? "multi-trade"),
-        season: String(payload.season ?? "shoulder"),
-        contractor_term: String(payload.contractor_term ?? ""),
-        customer_term: String(payload.customer_term ?? ""),
-        is_active: Boolean(payload.is_active ?? true),
-      });
-      return NextResponse.json({ ok: true });
+  const payload = (await request.json()) as Record<string, unknown>;
+  const action = String(payload.action ?? "upsert");
+
+  if (action === "seed") {
+    const result = await ensureTemplateAndKeywordSeeds();
+    return NextResponse.json({ ok: true, seeded: result });
+  }
+
+  if (action === "toggle") {
+    const id = String(payload.id ?? "");
+    const isActive = asBoolean(payload.isActive, true);
+    if (!id) {
+      return NextResponse.json({ error: "id is required" }, { status: 400 });
     }
+    await toggleTemplateActive(id, isActive);
+    return NextResponse.json({ ok: true });
   }
 
-  const form = await request.formData();
-  const intent = String(form.get("intent") ?? "create");
+  const saved = await upsertTemplate({
+    id: typeof payload.id === "string" ? payload.id : undefined,
+    name: String(payload.name ?? ""),
+    trade: String(payload.trade ?? "hvac") as GbpTrade,
+    season: String(payload.season ?? "heating") as GbpSeason,
+    bodyTemplate: String(payload.bodyTemplate ?? ""),
+    requiredServiceTerm: asBoolean(payload.requiredServiceTerm, true),
+    requiredServiceCity: asBoolean(payload.requiredServiceCity, true),
+    requiredPhotoCategory: asBoolean(payload.requiredPhotoCategory, true),
+    requiredCtaType: asBoolean(payload.requiredCtaType, true),
+    isActive: asBoolean(payload.isActive, true),
+  });
 
-  if (intent === "update") {
-    const id = String(form.get("id") ?? "");
-    const input: TemplateUpdateInput = {
-      id,
-      name: String(form.get("name") ?? "").trim(),
-      trade: String(form.get("trade") ?? "").trim(),
-      season: String(form.get("season") ?? "").trim(),
-      body_template: String(form.get("body_template") ?? "").trim(),
-      required_service_term: parseBoolean(form.get("required_service_term")),
-      required_service_city: parseBoolean(form.get("required_service_city")),
-      required_photo_category: parseBoolean(form.get("required_photo_category")),
-      required_cta_type: parseBoolean(form.get("required_cta_type")),
-      is_active: parseBoolean(form.get("is_active")),
-    };
-    await updateTemplate(input);
-    return NextResponse.redirect(new URL("/admin/templates", request.url), 303);
-  }
-
-  const input: TemplateCreateInput = {
-    name: String(form.get("name") ?? "").trim(),
-    trade: String(form.get("trade") ?? "").trim(),
-    season: String(form.get("season") ?? "").trim(),
-    body_template: String(form.get("body_template") ?? "").trim(),
-    required_service_term: parseBoolean(form.get("required_service_term")),
-    required_service_city: parseBoolean(form.get("required_service_city")),
-    required_photo_category: parseBoolean(form.get("required_photo_category")),
-    required_cta_type: parseBoolean(form.get("required_cta_type")),
-    is_active: parseBoolean(form.get("is_active")),
-  };
-
-  await createTemplate(input);
-  return NextResponse.redirect(new URL("/admin/templates", request.url), 303);
+  return NextResponse.json({ ok: true, template: saved });
 }

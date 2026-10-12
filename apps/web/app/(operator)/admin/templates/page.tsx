@@ -1,238 +1,140 @@
 import { redirect } from "next/navigation";
 import { getAdminUser } from "@nexus/admin-console";
-import { listTemplateLibrary } from "@/lib/gbp/templates";
+import { listTemplates, renderTemplatePreview } from "@/lib/gbp/templates";
 
-type SearchParams = {
-  q?: string;
-  trade?: string;
-  season?: string;
-  active?: string;
-};
+export const dynamic = "force-dynamic";
 
-const TRADE_OPTIONS = ["plumbing", "electrical", "hvac", "multi-trade"] as const;
-const SEASON_OPTIONS = ["cooling", "heating", "shoulder", "storm/freeze"] as const;
-
-function esc(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+interface PageProps {
+  searchParams?: Record<string, string | string[] | undefined>;
 }
 
-function renderPreview(bodyTemplate: string): string {
-  return bodyTemplate
-    .replaceAll("{{service_term}}", "furnace tune-up")
-    .replaceAll("{{service_city}}", "Grand Rapids")
-    .replaceAll("{{photo_category}}", "team-at-work")
-    .replaceAll("{{cta_type}}", "Call now for a same-week appointment");
+function firstValue(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) {
+    return value[0] ?? "";
+  }
+  return value ?? "";
 }
 
-export default async function AdminTemplatesPage({
-  searchParams,
-}: {
-  searchParams?: SearchParams;
-}): Promise<JSX.Element> {
+export default async function AdminTemplatesPage({ searchParams }: PageProps): Promise<JSX.Element> {
   const adminUser = await getAdminUser();
   if (!adminUser) {
     redirect("/");
   }
 
-  const filters = {
-    q: searchParams?.q?.trim() ?? "",
-    trade: searchParams?.trade?.trim() ?? "",
-    season: searchParams?.season?.trim() ?? "",
-    active:
-      searchParams?.active === "true"
-        ? true
-        : searchParams?.active === "false"
-          ? false
-          : undefined,
-  };
+  const trade = firstValue(searchParams?.trade) || "all";
+  const season = firstValue(searchParams?.season) || "all";
+  const active = firstValue(searchParams?.active) || "all";
+  const query = firstValue(searchParams?.query);
 
-  const templates = await listTemplateLibrary(filters);
+  const templates = await listTemplates({
+    trade: trade as "all" | "plumbing" | "electrical" | "hvac" | "multi-trade",
+    season: season as "all" | "cooling" | "heating" | "shoulder" | "storm-freeze",
+    active: active as "all" | "active" | "inactive",
+    query,
+  });
+
   const selected = templates[0];
+  const preview = selected
+    ? renderTemplatePreview(selected.bodyTemplate, {
+        serviceTerm: "AC repair",
+        serviceCity: "Springfield",
+        photoCategory: "team at work",
+        ctaType: "Call now",
+      })
+    : "";
 
   return (
     <main>
       <h1>Template Library</h1>
-      <p className="muted">
-        Operator-managed post skeletons and keyword seeds by trade and season.
-      </p>
+      <p>Operator-managed GBP post skeletons and keyword language seeds by trade and season.</p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: 16 }}>
-        <section>
-          <form className="toolbar" method="get">
-            <input
-              type="text"
-              name="q"
-              defaultValue={filters.q}
-              placeholder="Search title, body, CTA, terms"
-              aria-label="Search templates"
-            />
-            <select name="trade" defaultValue={filters.trade}>
-              <option value="">All trades</option>
-              {TRADE_OPTIONS.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-            <select name="season" defaultValue={filters.season}>
-              <option value="">All seasons</option>
-              {SEASON_OPTIONS.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-            <select name="active" defaultValue={searchParams?.active ?? ""}>
-              <option value="">Any status</option>
-              <option value="true">Active only</option>
-              <option value="false">Inactive only</option>
-            </select>
-            <button type="submit">Search</button>
-          </form>
+      <div className="toolbar">
+        <form method="get">
+          <label htmlFor="trade">Trade</label>
+          <select id="trade" name="trade" defaultValue={trade}>
+            <option value="all">All trades</option>
+            <option value="plumbing">Plumbing</option>
+            <option value="electrical">Electrical</option>
+            <option value="hvac">HVAC</option>
+            <option value="multi-trade">Multi-trade</option>
+          </select>
 
-          {templates.length === 0 ? (
-            <div className="empty">
-              <p>🧰</p>
-              <h2>No templates match this filter</h2>
-              <p className="muted">
-                Add the first HVAC heating-season template to start your library.
-              </p>
-              <a className="btn" href="/admin/templates">
-                Clear filters
-              </a>
-            </div>
-          ) : (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {templates.map((template) => (
-                <li key={template.id} className="card" style={{ marginBottom: 12 }}>
-                  <h3 style={{ marginTop: 0 }}>{template.name}</h3>
-                  <p className="muted">
-                    <strong>{template.trade}</strong> · <strong>{template.season}</strong> ·{" "}
-                    {template.is_active ? "Active" : "Inactive"}
-                  </p>
-                  <p>
-                    Slots: {template.required_service_term ? "service term" : ""}{" "}
-                    {template.required_service_city ? "service city" : ""}{" "}
-                    {template.required_photo_category ? "photo category" : ""}{" "}
-                    {template.required_cta_type ? "CTA type" : ""}
-                  </p>
-                  <details>
-                    <summary>Body template</summary>
-                    <pre>{template.body_template}</pre>
-                  </details>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+          <label htmlFor="season">Season</label>
+          <select id="season" name="season" defaultValue={season}>
+            <option value="all">All seasons</option>
+            <option value="cooling">Cooling</option>
+            <option value="heating">Heating</option>
+            <option value="shoulder">Shoulder</option>
+            <option value="storm-freeze">Storm/Freeze</option>
+          </select>
 
-        <section className="card">
-          <h2>{selected ? "Template editor" : "Create a template"}</h2>
-          <p className="muted">
-            Save updates through the operator API. Required slots keep posts locally specific.
-          </p>
+          <label htmlFor="active">Status</label>
+          <select id="active" name="active" defaultValue={active}>
+            <option value="all">All</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
 
-          <form action="/admin/api/templates" method="post">
-            <input type="hidden" name="intent" value={selected ? "update" : "create"} />
-            {selected ? <input type="hidden" name="id" value={selected.id} /> : null}
-
-            <label htmlFor="name">Name</label>
-            <input id="name" name="name" required defaultValue={selected?.name ?? ""} />
-
-            <label htmlFor="trade">Trade</label>
-            <select id="trade" name="trade" required defaultValue={selected?.trade ?? "hvac"}>
-              {TRADE_OPTIONS.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-
-            <label htmlFor="season">Season</label>
-            <select id="season" name="season" required defaultValue={selected?.season ?? "heating"}>
-              {SEASON_OPTIONS.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-
-            <label htmlFor="body_template">Body template</label>
-            <textarea
-              id="body_template"
-              name="body_template"
-              rows={8}
-              required
-              defaultValue={
-                selected?.body_template ??
-                "Serving {{service_city}} this week with dependable {{service_term}}. Photo: {{photo_category}}. {{cta_type}}."
-              }
-            />
-
-            <fieldset>
-              <legend>Required slots</legend>
-              <label>
-                <input
-                  type="checkbox"
-                  name="required_service_term"
-                  defaultChecked={selected?.required_service_term ?? true}
-                />
-                service_term
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  name="required_service_city"
-                  defaultChecked={selected?.required_service_city ?? true}
-                />
-                service_city
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  name="required_photo_category"
-                  defaultChecked={selected?.required_photo_category ?? true}
-                />
-                photo_category
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  name="required_cta_type"
-                  defaultChecked={selected?.required_cta_type ?? true}
-                />
-                cta_type
-              </label>
-            </fieldset>
-
-            <label>
-              <input type="checkbox" name="is_active" defaultChecked={selected?.is_active ?? true} />
-              Active
-            </label>
-
-            <button type="submit">{selected ? "Save template" : "Create template"}</button>
-          </form>
-
-          <h3>Live preview</h3>
-          <article className="card">
-            <p
-              dangerouslySetInnerHTML={{
-                __html: esc(
-                  renderPreview(
-                    selected?.body_template ??
-                      "Serving {{service_city}} this week with dependable {{service_term}}. Photo: {{photo_category}}. {{cta_type}}.",
-                  ),
-                ).replaceAll("\n", "<br />"),
-              }}
-            />
-          </article>
-        </section>
+          <label htmlFor="query">Search</label>
+          <input id="query" name="query" type="text" defaultValue={query} placeholder="Search templates" />
+          <button type="submit">Search</button>
+        </form>
       </div>
+
+      {templates.length === 0 ? (
+        <section className="empty">
+          <p role="img" aria-label="illustration">
+            🧰
+          </p>
+          <p>No templates match this filter.</p>
+          <p className="muted">Add the first HVAC heating-season template.</p>
+        </section>
+      ) : (
+        <section style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div>
+            {templates.map((template) => (
+              <article key={template.id} className="card" style={{ marginBottom: 12 }}>
+                <h3>{template.name}</h3>
+                <p className="muted">
+                  <strong>{template.trade}</strong> · <strong>{template.season}</strong> ·{" "}
+                  {template.isActive ? "Active" : "Inactive"}
+                </p>
+                <p className="muted">Requires: service term, city, photo category, CTA</p>
+              </article>
+            ))}
+          </div>
+
+          <div className="card">
+            <h2>Template Editor</h2>
+            <p className="muted">Save to /admin/api/templates (operator only).</p>
+            <form action="/admin/api/templates" method="post">
+              <input type="hidden" name="action" value="upsert" />
+              <label htmlFor="name">Name</label>
+              <input id="name" name="name" type="text" defaultValue={selected?.name ?? ""} required />
+              <label htmlFor="trade-edit">Trade</label>
+              <select id="trade-edit" name="trade" defaultValue={selected?.trade ?? "hvac"}>
+                <option value="plumbing">Plumbing</option>
+                <option value="electrical">Electrical</option>
+                <option value="hvac">HVAC</option>
+                <option value="multi-trade">Multi-trade</option>
+              </select>
+              <label htmlFor="season-edit">Season</label>
+              <select id="season-edit" name="season" defaultValue={selected?.season ?? "heating"}>
+                <option value="cooling">Cooling</option>
+                <option value="heating">Heating</option>
+                <option value="shoulder">Shoulder</option>
+                <option value="storm-freeze">Storm/Freeze</option>
+              </select>
+              <label htmlFor="bodyTemplate">Body Template</label>
+              <textarea id="bodyTemplate" name="bodyTemplate" rows={10} defaultValue={selected?.bodyTemplate ?? ""} />
+              <button type="submit">Save Template</button>
+            </form>
+
+            <h3>Live Preview</h3>
+            <pre>{preview}</pre>
+          </div>
+        </section>
+      )}
     </main>
   );
 }

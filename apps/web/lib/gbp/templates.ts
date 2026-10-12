@@ -1,149 +1,227 @@
-import { Pool } from "pg";
-import { seedTemplateLibrary } from "./template-seed";
+import { sql } from "@vercel/postgres";
+import { buildKeywordSeeds, buildTemplateSeeds } from "@/lib/gbp/template-seed";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+export type GbpTrade = "plumbing" | "electrical" | "hvac" | "multi-trade";
+export type GbpSeason = "cooling" | "heating" | "shoulder" | "storm-freeze";
+export type GbpPhotoCategory = "team" | "jobsite" | "before-after" | "equipment" | "finished-work";
+export type GbpCtaType = "call-now" | "book-online" | "request-quote" | "learn-more";
 
-export type TemplateRecord = {
+export interface GbpTemplateRecord {
   id: string;
   name: string;
-  trade: string;
-  season: string;
-  body_template: string;
-  required_service_term: boolean;
-  required_service_city: boolean;
-  required_photo_category: boolean;
-  required_cta_type: boolean;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
-};
-
-export type TemplateCreateInput = Omit<TemplateRecord, "id" | "created_at" | "updated_at">;
-export type TemplateUpdateInput = Partial<TemplateCreateInput> & { id: string };
-export type KeywordSeedInput = {
-  trade: string;
-  season: string;
-  contractor_term: string;
-  customer_term: string;
-  is_active: boolean;
-};
-
-let seeded = false;
-
-async function ensureSeeded(): Promise<void> {
-  if (seeded) return;
-  await seedTemplateLibrary(pool);
-  seeded = true;
+  trade: GbpTrade;
+  season: GbpSeason;
+  bodyTemplate: string;
+  requiredServiceTerm: boolean;
+  requiredServiceCity: boolean;
+  requiredPhotoCategory: boolean;
+  requiredCtaType: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export async function listTemplateLibrary(filters: {
-  q?: string;
-  trade?: string;
-  season?: string;
-  active?: boolean;
-}): Promise<TemplateRecord[]> {
-  await ensureSeeded();
-  const values: unknown[] = [];
-  const where: string[] = [];
+export interface GbpKeywordSeedRecord {
+  id: string;
+  trade: GbpTrade;
+  season: GbpSeason;
+  contractorTerm: string;
+  customerTerm: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
 
-  if (filters.q && filters.q.trim().length > 0) {
-    values.push(`%${filters.q.trim()}%`);
-    where.push(
-      `(name ILIKE $${values.length} OR body_template ILIKE $${values.length})`,
-    );
-  }
-  if (filters.trade && filters.trade.trim().length > 0) {
-    values.push(filters.trade.trim());
-    where.push(`trade = $${values.length}`);
-  }
-  if (filters.season && filters.season.trim().length > 0) {
-    values.push(filters.season.trim());
-    where.push(`season = $${values.length}`);
-  }
-  if (typeof filters.active === "boolean") {
-    values.push(filters.active);
-    where.push(`is_active = $${values.length}`);
-  }
+export interface TemplateFilters {
+  trade?: GbpTrade | "all";
+  season?: GbpSeason | "all";
+  active?: "all" | "active" | "inactive";
+  query?: string;
+}
 
-  const sql = `
-    SELECT id, name, trade, season, body_template, required_service_term, required_service_city,
-           required_photo_category, required_cta_type, is_active, created_at, updated_at
+export interface UpsertTemplateInput {
+  id?: string;
+  name: string;
+  trade: GbpTrade;
+  season: GbpSeason;
+  bodyTemplate: string;
+  requiredServiceTerm: boolean;
+  requiredServiceCity: boolean;
+  requiredPhotoCategory: boolean;
+  requiredCtaType: boolean;
+  isActive: boolean;
+}
+
+function normalizeTrade(value: string): GbpTrade {
+  if (value === "plumbing" || value === "electrical" || value === "hvac" || value === "multi-trade") {
+    return value;
+  }
+  throw new Error("invalid trade");
+}
+
+function normalizeSeason(value: string): GbpSeason {
+  if (value === "cooling" || value === "heating" || value === "shoulder" || value === "storm-freeze") {
+    return value;
+  }
+  throw new Error("invalid season");
+}
+
+function mapTemplateRow(row: Record<string, unknown>): GbpTemplateRecord {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    trade: normalizeTrade(String(row.trade)),
+    season: normalizeSeason(String(row.season)),
+    bodyTemplate: String(row.body_template),
+    requiredServiceTerm: Boolean(row.required_service_term),
+    requiredServiceCity: Boolean(row.required_service_city),
+    requiredPhotoCategory: Boolean(row.required_photo_category),
+    requiredCtaType: Boolean(row.required_cta_type),
+    isActive: Boolean(row.is_active),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+export async function listTemplates(filters: TemplateFilters): Promise<GbpTemplateRecord[]> {
+  const trade = filters.trade ?? "all";
+  const season = filters.season ?? "all";
+  const active = filters.active ?? "all";
+  const query = (filters.query ?? "").trim();
+
+  const result = await sql`
+    SELECT
+      id, name, trade, season, body_template,
+      required_service_term, required_service_city, required_photo_category, required_cta_type,
+      is_active, created_at, updated_at
     FROM gbp_post_templates
-    ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
-    ORDER BY updated_at DESC, created_at DESC
+    WHERE (${trade} = 'all' OR trade = ${trade})
+      AND (${season} = 'all' OR season = ${season})
+      AND (
+        ${active} = 'all'
+        OR (${active} = 'active' AND is_active = TRUE)
+        OR (${active} = 'inactive' AND is_active = FALSE)
+      )
+      AND (
+        ${query} = ''
+        OR name ILIKE ${`%${query}%`}
+        OR body_template ILIKE ${`%${query}%`}
+      )
+    ORDER BY is_active DESC, updated_at DESC, name ASC
   `;
-  const result = await pool.query<TemplateRecord>(sql, values);
-  return result.rows;
+  return result.rows.map((row) => mapTemplateRow(row));
 }
 
-export async function createTemplate(input: TemplateCreateInput): Promise<string> {
-  await ensureSeeded();
-  const result = await pool.query<{ id: string }>(
-    `
+export async function upsertTemplate(input: UpsertTemplateInput): Promise<GbpTemplateRecord> {
+  const trimmedName = input.name.trim();
+  const trimmedBody = input.bodyTemplate.trim();
+  if (!trimmedName) {
+    throw new Error("name is required");
+  }
+  if (!trimmedBody) {
+    throw new Error("bodyTemplate is required");
+  }
+
+  if (input.id) {
+    const updateResult = await sql`
+      UPDATE gbp_post_templates
+      SET
+        name = ${trimmedName},
+        trade = ${input.trade},
+        season = ${input.season},
+        body_template = ${trimmedBody},
+        required_service_term = ${input.requiredServiceTerm},
+        required_service_city = ${input.requiredServiceCity},
+        required_photo_category = ${input.requiredPhotoCategory},
+        required_cta_type = ${input.requiredCtaType},
+        is_active = ${input.isActive},
+        updated_at = NOW()
+      WHERE id = ${input.id}
+      RETURNING
+        id, name, trade, season, body_template,
+        required_service_term, required_service_city, required_photo_category, required_cta_type,
+        is_active, created_at, updated_at
+    `;
+    if (updateResult.rows.length === 0) {
+      throw new Error("template not found");
+    }
+    return mapTemplateRow(updateResult.rows[0]);
+  }
+
+  const insertResult = await sql`
     INSERT INTO gbp_post_templates (
-      name, trade, season, body_template, required_service_term, required_service_city,
-      required_photo_category, required_cta_type, is_active
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-    RETURNING id
-    `,
-    [
-      input.name,
-      input.trade,
-      input.season,
-      input.body_template,
-      input.required_service_term,
-      input.required_service_city,
-      input.required_photo_category,
-      input.required_cta_type,
-      input.is_active,
-    ],
-  );
-  return result.rows[0].id;
+      name, trade, season, body_template,
+      required_service_term, required_service_city, required_photo_category, required_cta_type,
+      is_active
+    ) VALUES (
+      ${trimmedName}, ${input.trade}, ${input.season}, ${trimmedBody},
+      ${input.requiredServiceTerm}, ${input.requiredServiceCity}, ${input.requiredPhotoCategory}, ${input.requiredCtaType},
+      ${input.isActive}
+    )
+    RETURNING
+      id, name, trade, season, body_template,
+      required_service_term, required_service_city, required_photo_category, required_cta_type,
+      is_active, created_at, updated_at
+  `;
+  return mapTemplateRow(insertResult.rows[0]);
 }
 
-export async function updateTemplate(input: TemplateUpdateInput): Promise<void> {
-  await ensureSeeded();
-  await pool.query(
-    `
+export async function toggleTemplateActive(id: string, isActive: boolean): Promise<void> {
+  await sql`
     UPDATE gbp_post_templates
-    SET
-      name = COALESCE($2, name),
-      trade = COALESCE($3, trade),
-      season = COALESCE($4, season),
-      body_template = COALESCE($5, body_template),
-      required_service_term = COALESCE($6, required_service_term),
-      required_service_city = COALESCE($7, required_service_city),
-      required_photo_category = COALESCE($8, required_photo_category),
-      required_cta_type = COALESCE($9, required_cta_type),
-      is_active = COALESCE($10, is_active),
-      updated_at = NOW()
-    WHERE id = $1
-    `,
-    [
-      input.id,
-      input.name ?? null,
-      input.trade ?? null,
-      input.season ?? null,
-      input.body_template ?? null,
-      input.required_service_term ?? null,
-      input.required_service_city ?? null,
-      input.required_photo_category ?? null,
-      input.required_cta_type ?? null,
-      input.is_active ?? null,
-    ],
-  );
+    SET is_active = ${isActive}, updated_at = NOW()
+    WHERE id = ${id}
+  `;
 }
 
-export async function upsertKeywordSeed(input: KeywordSeedInput): Promise<void> {
-  await ensureSeeded();
-  await pool.query(
-    `
-    INSERT INTO gbp_keyword_seeds (
-      trade, season, contractor_term, customer_term, is_active
-    ) VALUES ($1,$2,$3,$4,$5)
-    ON CONFLICT (trade, season, contractor_term, customer_term)
-    DO UPDATE SET is_active = EXCLUDED.is_active, updated_at = NOW()
-    `,
-    [input.trade, input.season, input.contractor_term, input.customer_term, input.is_active],
-  );
+export async function ensureTemplateAndKeywordSeeds(): Promise<{ templates: number; keywords: number }> {
+  const templates = buildTemplateSeeds();
+  const keywords = buildKeywordSeeds();
+
+  for (const template of templates) {
+    await sql`
+      INSERT INTO gbp_post_templates (
+        name, trade, season, body_template,
+        required_service_term, required_service_city, required_photo_category, required_cta_type,
+        is_active
+      ) VALUES (
+        ${template.name}, ${template.trade}, ${template.season}, ${template.bodyTemplate},
+        ${template.requiredServiceTerm}, ${template.requiredServiceCity}, ${template.requiredPhotoCategory}, ${template.requiredCtaType},
+        ${template.isActive}
+      )
+      ON CONFLICT (name) DO UPDATE SET
+        trade = EXCLUDED.trade,
+        season = EXCLUDED.season,
+        body_template = EXCLUDED.body_template,
+        required_service_term = EXCLUDED.required_service_term,
+        required_service_city = EXCLUDED.required_service_city,
+        required_photo_category = EXCLUDED.required_photo_category,
+        required_cta_type = EXCLUDED.required_cta_type,
+        is_active = EXCLUDED.is_active,
+        updated_at = NOW()
+    `;
+  }
+
+  for (const seed of keywords) {
+    await sql`
+      INSERT INTO gbp_keyword_seeds (trade, season, contractor_term, customer_term, is_active)
+      VALUES (${seed.trade}, ${seed.season}, ${seed.contractorTerm}, ${seed.customerTerm}, ${seed.isActive})
+      ON CONFLICT (trade, season, contractor_term, customer_term) DO UPDATE SET
+        is_active = EXCLUDED.is_active,
+        updated_at = NOW()
+    `;
+  }
+
+  return { templates: templates.length, keywords: keywords.length };
+}
+
+export function renderTemplatePreview(
+  bodyTemplate: string,
+  slots: { serviceTerm: string; serviceCity: string; photoCategory: string; ctaType: string },
+): string {
+  return bodyTemplate
+    .replaceAll("{{service_term}}", slots.serviceTerm)
+    .replaceAll("{{service_city}}", slots.serviceCity)
+    .replaceAll("{{photo_category}}", slots.photoCategory)
+    .replaceAll("{{cta_type}}", slots.ctaType);
 }
