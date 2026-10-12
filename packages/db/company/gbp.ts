@@ -118,3 +118,65 @@ CREATE TABLE IF NOT EXISTS gbp_keyword_seeds (
 CREATE INDEX IF NOT EXISTS gbp_keyword_seeds_trade_season_idx
   ON gbp_keyword_seeds (trade, season, is_active, updated_at DESC);
 `;
+
+/**
+ * Voice Profile Builder (F1-004) — the sub-15-minute onboarding questionnaire.
+ *
+ * One profile per org (UNIQUE org_id). Progress is saved per step via
+ * current_step so an owner can finish on a phone in the truck across sessions.
+ * Tone sliders are stored as 0–100 integers (0 = formal/brief, 100 =
+ * casual/chatty). credential_claims_opt_in defaults FALSE because the liability
+ * assessor requires human review of any post claiming specific licensing
+ * credentials. The warm-up policy auto_publish_posts / auto_publish_replies both
+ * default FALSE and flip on only after the owner's first approvals.
+ *
+ * No CHECK constraints are placed on the free-form text / text[] columns
+ * (sign_off_name, phrases_to_use, phrases_to_avoid, service_lines) per the
+ * company SQL constraints.
+ */
+export const GBP_VOICE_PROFILE_SCHEMA_DDL = `
+CREATE TABLE IF NOT EXISTS gbp_voice_profiles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL,
+  connection_id UUID,
+  trades TEXT[] NOT NULL DEFAULT '{}',
+  service_lines TEXT[] NOT NULL DEFAULT '{}',
+  customer_terms TEXT[] NOT NULL DEFAULT '{}',
+  service_area_cities JSONB NOT NULL DEFAULT '[]'::jsonb,
+  tone_formal_casual INTEGER NOT NULL DEFAULT 50,
+  tone_brief_chatty INTEGER NOT NULL DEFAULT 50,
+  sign_off_name TEXT,
+  phrases_to_use TEXT[] NOT NULL DEFAULT '{}',
+  phrases_to_avoid TEXT[] NOT NULL DEFAULT '{}',
+  credential_claims_opt_in BOOLEAN NOT NULL DEFAULT FALSE,
+  auto_publish_posts BOOLEAN NOT NULL DEFAULT FALSE,
+  auto_publish_replies BOOLEAN NOT NULL DEFAULT FALSE,
+  sample_reply_count INTEGER NOT NULL DEFAULT 0,
+  current_step INTEGER NOT NULL DEFAULT 1,
+  first_draft_post TEXT,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (org_id)
+);
+
+CREATE INDEX IF NOT EXISTS gbp_voice_profiles_org_idx
+  ON gbp_voice_profiles (org_id);
+
+CREATE TABLE IF NOT EXISTS gbp_voice_sample_replies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL,
+  profile_id UUID,
+  review_id TEXT NOT NULL,
+  reviewer_display_name TEXT,
+  review_comment TEXT,
+  star_rating TEXT,
+  reply_comment TEXT NOT NULL,
+  replied_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (org_id, review_id)
+);
+
+CREATE INDEX IF NOT EXISTS gbp_voice_sample_replies_org_idx
+  ON gbp_voice_sample_replies (org_id, replied_at DESC);
+`;
