@@ -84,4 +84,37 @@ CREATE TABLE IF NOT EXISTS gbp_locations_cache (
 
 CREATE INDEX IF NOT EXISTS gbp_locations_cache_org_idx
   ON gbp_locations_cache (org_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS gbp_post_templates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  trade TEXT NOT NULL,
+  season TEXT NOT NULL,
+  body_template TEXT NOT NULL,
+  required_service_term BOOLEAN NOT NULL DEFAULT TRUE,
+  required_service_city BOOLEAN NOT NULL DEFAULT TRUE,
+  required_photo_category BOOLEAN NOT NULL DEFAULT TRUE,
+  required_cta_type BOOLEAN NOT NULL DEFAULT TRUE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS gbp_post_templates_trade_season_idx
+  ON gbp_post_templates (trade, season, is_active, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS gbp_keyword_seeds (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trade TEXT NOT NULL,
+  season TEXT NOT NULL,
+  contractor_term TEXT NOT NULL,
+  customer_term TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (trade, season, contractor_term, customer_term)
+);
+
+CREATE INDEX IF NOT EXISTS gbp_keyword_seeds_trade_season_idx
+  ON gbp_keyword_seeds (trade, season, is_active, updated_at DESC);
 `;
