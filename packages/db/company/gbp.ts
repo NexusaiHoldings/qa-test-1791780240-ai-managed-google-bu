@@ -117,6 +117,26 @@ CREATE TABLE IF NOT EXISTS gbp_keyword_seeds (
 
 CREATE INDEX IF NOT EXISTS gbp_keyword_seeds_trade_season_idx
   ON gbp_keyword_seeds (trade, season, is_active, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS gbp_keyword_rank_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL,
+  location_name TEXT,
+  keyword TEXT NOT NULL,
+  rank INTEGER NOT NULL DEFAULT 0,
+  previous_rank INTEGER,
+  movement INTEGER NOT NULL DEFAULT 0,
+  snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  source TEXT NOT NULL DEFAULT 'dataforseo',
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS gbp_keyword_rank_snapshots_org_date_idx
+  ON gbp_keyword_rank_snapshots (org_id, snapshot_date DESC);
+
+CREATE INDEX IF NOT EXISTS gbp_keyword_rank_snapshots_org_keyword_idx
+  ON gbp_keyword_rank_snapshots (org_id, keyword, snapshot_date DESC);
 `;
 
 /**
