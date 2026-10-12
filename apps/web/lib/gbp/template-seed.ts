@@ -111,19 +111,40 @@ function contractorTermsByTrade(trade: GbpTrade): string[] {
   ];
 }
 
+/**
+ * Translate a contractor's industry term into plain customer language. The Local
+ * Search Forum evidence insists on this: "use words like AC or heating system or
+ * boiler service" because "Not everyone knows what HVAC means".
+ */
+function toCustomerLanguage(term: string): string {
+  return term
+    .replace(/\bHVAC\b/g, "AC or heating")
+    .replace(/\bair conditioner\b/gi, "AC")
+    .replace(/\bfurnace\b/gi, "heating system")
+    .replace(/\bboiler\b/gi, "boiler service")
+    .replace(/\bbackflow testing\b/gi, "water safety test")
+    .replace(/\bsump pump\b/gi, "basement water pump")
+    .replace(/\belectrical panel\b/gi, "breaker box")
+    .replace(/\bEV charger\b/gi, "car charger");
+}
+
+/**
+ * Two distinct, genuinely customer-phrased search terms per contractor term —
+ * the plain-language variant plus the "near me" intent phrasing homeowners
+ * actually type. Guaranteed distinct within a (trade, season, contractor_term).
+ */
 function customerTermsByContractorTerm(term: string): string[] {
-  return [
-    term.replace("HVAC", "AC or heating"),
-    term.replace("air conditioner", "AC"),
-    term.replace("furnace", "heating system"),
-    term.replace("boiler", "boiler service"),
-    `${term} near me`,
-    `${term} in my area`,
-    `fix ${term.split(" ")[0]} issue`,
-    `help with ${term}`,
-    `local ${term}`,
-    `same day ${term}`,
-  ];
+  const layman = toCustomerLanguage(term);
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const candidate of [`${layman} near me`, `${layman} cost`, `local ${layman}`]) {
+    const normalized = candidate.toLowerCase();
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      terms.push(candidate);
+    }
+  }
+  return terms;
 }
 
 export function buildTemplateSeeds(): TemplateSeedDefinition[] {
