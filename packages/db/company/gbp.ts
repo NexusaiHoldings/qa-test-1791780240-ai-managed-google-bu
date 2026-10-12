@@ -117,6 +117,26 @@ CREATE TABLE IF NOT EXISTS gbp_keyword_seeds (
 
 CREATE INDEX IF NOT EXISTS gbp_keyword_seeds_trade_season_idx
   ON gbp_keyword_seeds (trade, season, is_active, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS gbp_keyword_rank_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL,
+  location_name TEXT,
+  keyword TEXT NOT NULL,
+  rank INTEGER NOT NULL DEFAULT 0,
+  previous_rank INTEGER,
+  movement INTEGER NOT NULL DEFAULT 0,
+  snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  source TEXT NOT NULL DEFAULT 'dataforseo',
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS gbp_keyword_rank_snapshots_org_date_idx
+  ON gbp_keyword_rank_snapshots (org_id, snapshot_date DESC);
+
+CREATE INDEX IF NOT EXISTS gbp_keyword_rank_snapshots_org_keyword_idx
+  ON gbp_keyword_rank_snapshots (org_id, keyword, snapshot_date DESC);
 `;
 
 /**
@@ -311,3 +331,47 @@ CREATE INDEX IF NOT EXISTS gbp_reviews_escalation_idx
 CREATE INDEX IF NOT EXISTS gbp_reviews_location_idx
   ON gbp_reviews (location_name, reply_status);
 `;
+
+/**
+ * Profile Activity Dashboard & Weekly Digest (F1-008) company table.
+ *
+ * Owns the weekly-digest delivery ledger (`gbp_digest_deliveries`): one row per
+ * org per ISO week recording that the Monday snapshot was pushed (and over which
+ * surface — `delivery_surface`, honoring the "no required owner logins" product
+ * constraint). The UNIQUE (org_id, week_start) key makes the digest cron
+ * idempotent: a re-run in the same week finds the row and skips, so owners never
+ * get a double email.
+ *
+ * The dashboard and digest READ from tables owned by other GBP features
+ * (`gbp_connections`, `gbp_posts`, `gbp_reviews`, `gbp_keyword_rank_snapshots`,
+ * `gbp_publish_slots`) and from the identity/organizations legos (`users`,
+ * `organizations`, `org_members`) — all declared by their own schemas — so this
+ * ledger is the only NEW table this feature introduces.
+ */
+export const GBP_DIGEST_DDL = `
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS gbp_digest_deliveries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL,
+  user_id UUID,
+  email TEXT,
+  week_start DATE NOT NULL,
+  delivery_surface TEXT NOT NULL DEFAULT 'email',
+  status TEXT NOT NULL DEFAULT 'sent',
+  post_id UUID,
+  post_needs_approval BOOLEAN NOT NULL DEFAULT FALSE,
+  reviews_waiting INTEGER NOT NULL DEFAULT 0,
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (org_id, week_start)
+);
+
+CREATE INDEX IF NOT EXISTS gbp_digest_deliveries_org_week_idx
+  ON gbp_digest_deliveries (org_id, week_start DESC);
+
+CREATE INDEX IF NOT EXISTS gbp_digest_deliveries_week_idx
+  ON gbp_digest_deliveries (week_start DESC, status);
+`;
+
