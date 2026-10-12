@@ -223,3 +223,91 @@ CREATE INDEX IF NOT EXISTS gbp_posts_location_published_idx
 CREATE INDEX IF NOT EXISTS gbp_posts_status_idx
   ON gbp_posts (status, week_start);
 `;
+
+/**
+ * Review Responder & Sensitivity Gate (F1-006) company tables.
+ *
+ * Owns the per-location review-reply voice/warm-up settings (`gbp_review_settings`)
+ * and the mirrored review + draft + reply ledger (`gbp_reviews`).
+ *
+ * The raw reviewer comment is NEVER stored — only the PII-redacted text lands in
+ * `gbp_reviews.comment_redacted` (the raw string is redacted in memory before the
+ * first write or any LLM call). `support_ticket_id` references the
+ * support-and-help lego's `support_tickets` table and every publish writes an
+ * audit event to the admin-console lego's `admin_audit_log` table — both tables
+ * are created by their lego schemas, so only the two tables we OWN are declared
+ * here.
+ */
+export const GBP_REVIEWS_DDL = `
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS gbp_review_settings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL,
+  connection_id UUID,
+  location_name TEXT NOT NULL,
+  voice_profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+  warmup_replies_remaining INTEGER NOT NULL DEFAULT 3,
+  auto_publish_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  escalate_after_hours INTEGER NOT NULL DEFAULT 72,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (org_id, location_name)
+);
+
+CREATE INDEX IF NOT EXISTS gbp_review_settings_org_idx
+  ON gbp_review_settings (org_id, is_active);
+
+CREATE TABLE IF NOT EXISTS gbp_reviews (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL,
+  connection_id UUID,
+  location_name TEXT,
+  google_review_id TEXT NOT NULL,
+  google_review_name TEXT,
+  reviewer_display_name TEXT,
+  reviewer_is_anonymous BOOLEAN NOT NULL DEFAULT FALSE,
+  star_rating INTEGER NOT NULL DEFAULT 0,
+  comment_redacted TEXT,
+  comment_redactions JSONB NOT NULL DEFAULT '[]'::jsonb,
+  had_comment BOOLEAN NOT NULL DEFAULT FALSE,
+  review_create_time TIMESTAMPTZ,
+  review_update_time TIMESTAMPTZ,
+  sensitivity TEXT NOT NULL DEFAULT 'low',
+  sensitivity_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+  sensitivity_detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+  draft_reply TEXT,
+  draft_kind TEXT NOT NULL DEFAULT 'voice_matched',
+  used_gateway BOOLEAN NOT NULL DEFAULT FALSE,
+  moderation_passed BOOLEAN NOT NULL DEFAULT FALSE,
+  moderation_detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+  reply_status TEXT NOT NULL DEFAULT 'pending',
+  published_reply TEXT,
+  published_at TIMESTAMPTZ,
+  is_warmup BOOLEAN NOT NULL DEFAULT FALSE,
+  queued_at TIMESTAMPTZ,
+  notified_at TIMESTAMPTZ,
+  escalated_at TIMESTAMPTZ,
+  support_ticket_id UUID,
+  approved_by UUID,
+  approved_at TIMESTAMPTZ,
+  failure_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (org_id, google_review_id)
+);
+
+CREATE INDEX IF NOT EXISTS gbp_reviews_org_created_idx
+  ON gbp_reviews (org_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS gbp_reviews_queue_idx
+  ON gbp_reviews (org_id, reply_status, sensitivity, queued_at);
+
+CREATE INDEX IF NOT EXISTS gbp_reviews_escalation_idx
+  ON gbp_reviews (reply_status, queued_at)
+  WHERE escalated_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS gbp_reviews_location_idx
+  ON gbp_reviews (location_name, reply_status);
+`;
