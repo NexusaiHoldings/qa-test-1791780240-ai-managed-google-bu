@@ -26,6 +26,7 @@
 import type { HandlerContext, HandlerResult } from "@nexus/identity-and-access";
 import { handlePublishGbpPost } from "./publish_gbp_post";
 import { handlePublishReviewReply } from "./publish_review_reply";
+import { handleQueueReplyForOwnerApproval } from "./queue_reply_for_owner_approval";
 
 type Args = Record<string, unknown>;
 
@@ -36,4 +37,5 @@ export const DOMAIN_DISPATCH: Record<
   // Build agent appends entries here per CTO-declared new_domain_tool.
   publish_gbp_post: (ctx, a) => handlePublishGbpPost(ctx, a),
   publish_review_reply: (ctx, a) => handlePublishReviewReply(ctx, a),
+  queue_reply_for_owner_approval: (ctx, a) => handleQueueReplyForOwnerApproval(ctx, a),
 };
