@@ -1,216 +1,215 @@
 import type { HandlerContext, HandlerResult } from "@nexus/identity-and-access";
 
 type Args = {
+  location_id?: unknown;
   locationId?: unknown;
-  incidentType?: unknown;
   reason?: unknown;
-  source?: unknown;
-  occurredAt?: unknown;
+  details?: unknown;
+  source_event?: unknown;
+  sourceEvent?: unknown;
   status?: unknown;
-  requiresConfirmation?: unknown;
-  confirmed?: unknown;
+  previous_status?: unknown;
+  previousStatus?: unknown;
 };
 
-type DbClient = {
-  query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
+type JsonObject = Record<string, unknown>;
+
+type PgLikeClient = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows?: Array<Record<string, unknown>> }>;
 };
 
-type NotificationPayload = {
-  orgId: string;
-  locationId: string;
-  publishingStatus: "paused" | "suspended";
-  incidentType: string;
-  reason: string;
-  source: string;
-  occurredAt: string;
-};
+const VALID_REASONS = new Set([
+  "suspension",
+  "policy_rejection",
+  "revoked_token",
+  "publish_failures",
+]);
 
-function asNonEmptyString(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed: string = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+const VALID_TARGET_STATUSES = new Set(["paused", "suspended"]);
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-function parseBoolean(value: unknown, fallback: boolean): boolean {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const normalized: string = value.trim().toLowerCase();
-    if (normalized === "true") return true;
-    if (normalized === "false") return false;
+function getDbClientFromContext(ctx: HandlerContext): PgLikeClient | null {
+  const candidates: unknown[] = [
+    (ctx as unknown as { db?: unknown }).db,
+    (ctx as unknown as { pg?: unknown }).pg,
+    (ctx as unknown as { pool?: unknown }).pool,
+    (ctx as unknown as { client?: unknown }).client,
+    (ctx as unknown as { services?: { db?: unknown } }).services?.db,
+    (ctx as unknown as { runtime?: { db?: unknown } }).runtime?.db,
+  ];
+
+  for (const candidate of candidates) {
+    if (
+      candidate &&
+      typeof candidate === "object" &&
+      "query" in (candidate as Record<string, unknown>) &&
+      typeof (candidate as { query?: unknown }).query === "function"
+    ) {
+      return candidate as PgLikeClient;
+    }
   }
-  return fallback;
+  return null;
 }
 
-function getDbFromContext(ctx: HandlerContext): DbClient {
-  const candidate: unknown = (ctx as { db?: unknown }).db;
-  if (
-    typeof candidate === "object" &&
-    candidate !== null &&
-    typeof (candidate as DbClient).query === "function"
-  ) {
-    return candidate as DbClient;
-  }
-  throw new Error("pause_location_publishing requires ctx.db.query");
+function getOrgIdFromContext(ctx: HandlerContext): string | null {
+  const direct = asString((ctx as unknown as { orgId?: unknown }).orgId);
+  if (direct) return direct;
+
+  const sessionOrg = asString(
+    (ctx as unknown as { session?: { orgId?: unknown } }).session?.orgId,
+  );
+  if (sessionOrg) return sessionOrg;
+
+  const tenantOrg = asString(
+    (ctx as unknown as { tenant?: { orgId?: unknown } }).tenant?.orgId,
+  );
+  return tenantOrg;
 }
 
-async function notifyOwner(
-  ctx: HandlerContext,
-  payload: NotificationPayload,
-): Promise<{ delivered: boolean; channel: string }> {
-  const notifier: unknown = (ctx as { notifyOwner?: unknown }).notifyOwner;
-  if (typeof notifier === "function") {
-    await (notifier as (name: string, data: NotificationPayload) => Promise<void>)(
-      "gbp_location_publishing_paused",
-      payload,
-    );
-    return { delivered: true, channel: "ctx.notifyOwner" };
-  }
+function toHandlerError(code: string, message: string, meta?: JsonObject): HandlerResult {
+  return {
+    ok: false,
+    code,
+    message,
+    ...(meta ? { meta } : {}),
+  } as unknown as HandlerResult;
+}
 
-  const logger: unknown = (ctx as { logger?: unknown }).logger;
-  if (typeof logger === "object" && logger && typeof (logger as { info?: unknown }).info === "function") {
-    (logger as { info: (entry: Record<string, unknown>) => void }).info({
-      event: "owner_notification_skipped",
-      tool: "pause_location_publishing",
-      reason: "notifyOwner_missing_on_context",
-      payload,
-    });
-  }
-
-  return { delivered: false, channel: "none" };
+function toHandlerOk(message: string, data: JsonObject): HandlerResult {
+  return {
+    ok: true,
+    message,
+    data,
+  } as unknown as HandlerResult;
 }
 
 export async function handlePauseLocationPublishing(
   ctx: HandlerContext,
   args: Args,
 ): Promise<HandlerResult> {
-  const locationId: string | null = asNonEmptyString(args.locationId);
-  const incidentType: string = asNonEmptyString(args.incidentType) ?? "unknown";
-  const reason: string = asNonEmptyString(args.reason) ?? "No reason supplied";
-  const source: string = asNonEmptyString(args.source) ?? "agent";
-  const occurredAtIso: string = asNonEmptyString(args.occurredAt) ?? new Date().toISOString();
-  const requestedStatusRaw: string = (asNonEmptyString(args.status) ?? "paused").toLowerCase();
-  const publishingStatus: "paused" | "suspended" =
-    requestedStatusRaw === "suspended" ? "suspended" : "paused";
-  const requiresConfirmation: boolean = parseBoolean(args.requiresConfirmation, true);
-  const confirmed: boolean = parseBoolean(args.confirmed, false);
-
-  if (!locationId) {
-    return {
-      ok: false,
-      error: "invalid_args",
-      message: "locationId is required",
-    } satisfies HandlerResult;
+  const db = getDbClientFromContext(ctx);
+  if (!db) {
+    return toHandlerError("db_unavailable", "Database client is unavailable in handler context.");
   }
 
-  if (requiresConfirmation && !confirmed) {
-    return {
-      ok: false,
-      error: "confirmation_required",
-      message: "pause_location_publishing is confirm-gated. Re-run with confirmed=true.",
-      data: {
-        locationId,
-        requestedStatus: publishingStatus,
-        incidentType,
-        autonomy: "autonomous",
-        mutationRoutedVia: "cross_boundary_bridge",
-      },
-    } satisfies HandlerResult;
-  }
-
-  const db: DbClient = getDbFromContext(ctx);
-
-  const locationLookup = await db.query(
-    `
-      SELECT id, org_id
-      FROM gbp_locations
-      WHERE id = $1
-      LIMIT 1
-    `,
-    [locationId],
-  );
-
-  if (locationLookup.rows.length === 0) {
-    return {
-      ok: false,
-      error: "not_found",
-      message: `GBP location not found: ${locationId}`,
-    } satisfies HandlerResult;
-  }
-
-  const row: Record<string, unknown> = locationLookup.rows[0];
-  const orgId: string | null = asNonEmptyString(row.org_id);
+  const orgId = getOrgIdFromContext(ctx);
   if (!orgId) {
-    return {
-      ok: false,
-      error: "data_integrity_error",
-      message: "Location exists but org_id is missing",
-    } satisfies HandlerResult;
+    return toHandlerError("missing_org", "Organization context is required.");
   }
 
-  await db.query(
-    `
-      UPDATE gbp_locations
-      SET publishing_status = $2,
-          updated_at = NOW()
-      WHERE id = $1
-    `,
-    [locationId, publishingStatus],
-  );
+  const locationId = asString(args.location_id) ?? asString(args.locationId);
+  if (!locationId) {
+    return toHandlerError("invalid_args", "location_id is required.");
+  }
 
-  await db.query(
-    `
-      INSERT INTO gbp_health_incidents (
-        id,
-        org_id,
-        location_id,
-        incident_type,
-        severity,
-        status,
-        source,
-        reason,
-        occurred_at,
-        created_at,
-        updated_at
-      )
-      VALUES (
-        gen_random_uuid(),
-        $1,
-        $2,
-        $3,
-        CASE WHEN $4 = 'suspended' THEN 'high' ELSE 'medium' END,
-        'open',
-        $5,
-        $6,
-        $7::timestamptz,
-        NOW(),
-        NOW()
-      )
-    `,
-    [orgId, locationId, incidentType, publishingStatus, source, reason, occurredAtIso],
-  );
+  const reason = (asString(args.reason) ?? "").toLowerCase();
+  if (!VALID_REASONS.has(reason)) {
+    return toHandlerError(
+      "invalid_args",
+      "reason must be one of: suspension, policy_rejection, revoked_token, publish_failures.",
+    );
+  }
 
-  const notification = await notifyOwner(ctx, {
-    orgId,
-    locationId,
-    publishingStatus,
-    incidentType,
-    reason,
-    source,
-    occurredAt: occurredAtIso,
-  });
+  const requestedStatus = (asString(args.status) ?? "").toLowerCase();
+  const targetStatus = VALID_TARGET_STATUSES.has(requestedStatus)
+    ? requestedStatus
+    : reason === "suspension"
+      ? "suspended"
+      : "paused";
 
-  return {
-    ok: true,
-    data: {
-      locationId,
-      orgId,
-      publishingStatus,
-      incidentType,
-      source,
-      occurredAt: occurredAtIso,
-      ownerNotification: notification,
-      autonomy: "autonomous",
-      mutationRoutedVia: "cross_boundary_bridge",
-    },
-  } satisfies HandlerResult;
+  const details: JsonObject =
+    args.details && typeof args.details === "object" ? (args.details as JsonObject) : {};
+  const sourceEvent = asString(args.source_event) ?? asString(args.sourceEvent) ?? reason;
+  const previousStatusArg =
+    asString(args.previous_status) ?? asString(args.previousStatus) ?? undefined;
+
+  const nowIso = new Date().toISOString();
+
+  try {
+    const locationRes = await db.query(
+      `SELECT id, org_id, publishing_status
+       FROM gbp_locations
+       WHERE id = $1 AND org_id = $2
+       LIMIT 1`,
+      [locationId, orgId],
+    );
+
+    const location = locationRes.rows?.[0];
+    if (!location) {
+      return toHandlerError("not_found", "Location not found for org.", { location_id: locationId });
+    }
+
+    const previousStatus = previousStatusArg ?? asString(location.publishing_status) ?? "active";
+
+    await db.query(
+      `UPDATE gbp_locations
+       SET publishing_status = $1,
+           updated_at = NOW()
+       WHERE id = $2 AND org_id = $3`,
+      [targetStatus, locationId, orgId],
+    );
+
+    await db.query(
+      `INSERT INTO gbp_health_incidents
+         (id, org_id, location_id, incident_type, severity, status, title, summary, metadata, created_at, updated_at)
+       VALUES
+         (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW(), NOW())`,
+      [
+        orgId,
+        locationId,
+        "publishing_paused",
+        targetStatus === "suspended" ? "high" : "medium",
+        "open",
+        "Publishing paused by agent tool",
+        `Publishing status changed from ${previousStatus} to ${targetStatus} due to ${reason}.`,
+        JSON.stringify({
+          reason,
+          previous_status: previousStatus,
+          new_status: targetStatus,
+          source_event: sourceEvent,
+          occurred_at: nowIso,
+          details,
+        }),
+      ],
+    );
+
+    await db.query(
+      `INSERT INTO notifications_outbox
+         (id, org_id, channel, template_key, recipient_ref, payload, status, created_at, updated_at)
+       VALUES
+         (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, NOW(), NOW())`,
+      [
+        orgId,
+        "in_app",
+        "gbp_location_publishing_paused",
+        locationId,
+        JSON.stringify({
+          location_id: locationId,
+          reason,
+          source_event: sourceEvent,
+          previous_status: previousStatus,
+          new_status: targetStatus,
+          details,
+        }),
+        "queued",
+      ],
+    );
+
+    return toHandlerOk("Location publishing paused.", {
+      location_id: locationId,
+      previous_status: previousStatus,
+      new_status: targetStatus,
+      reason,
+      source_event: sourceEvent,
+    });
+  } catch (error: unknown) {
+    return toHandlerError("pause_failed", "Failed to pause location publishing.", {
+      location_id: locationId,
+      org_id: orgId,
+      error: error instanceof Error ? error.message : "unknown_error",
+    });
+  }
 }
