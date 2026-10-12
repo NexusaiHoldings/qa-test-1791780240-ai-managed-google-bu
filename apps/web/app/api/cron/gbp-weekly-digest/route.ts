@@ -1,65 +1,77 @@
 import { NextResponse } from "next/server";
-import { buildWeeklyDigest } from "@/lib/gbp/digest";
+import { sql } from "@vercel/postgres";
+import { sendTransactionalEmail } from "@nexus/notifications";
+import { getWeeklyDigestSummaryForOrg } from "@/lib/gbp/digest";
+import { getDisclosureText } from "@/lib/gbp/disclosure";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-type NotificationClient = {
-  sendTransactional: (input: {
-    orgId: string;
-    channel: "email" | "in_app" | "sms";
-    template: string;
-    subject: string;
-    body: string;
-    actionUrl?: string;
-    metadata?: Record<string, unknown>;
-  }) => Promise<void>;
+type TargetRow = {
+  org_id: string;
+  email: string;
+  user_id: string;
 };
 
-async function getNotifier(): Promise<NotificationClient> {
-  const mod = await import("@nexus/notifications");
-  return mod as unknown as NotificationClient;
-}
-
-export async function GET(): Promise<NextResponse> {
-  const cronSecret = process.env.CRON_SECRET;
-  const required = process.env.GBP_WEEKLY_DIGEST_ENABLED ?? "true";
-  if (required !== "true") {
-    return NextResponse.json({ ok: true, skipped: true, reason: "disabled" });
+export async function GET(request: Request): Promise<NextResponse> {
+  const auth = request.headers.get("authorization");
+  if (!process.env.CRON_SECRET || auth !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  try {
-    const { sql } = await import("@/lib/db");
-    const orgRows = await sql<{ org_id: string }[]>`
-      SELECT DISTINCT org_id
-      FROM gbp_connections
-      WHERE connection_state IS NOT NULL
-    `;
+  const recipients = await sql<TargetRow>`
+    SELECT DISTINCT ON (om.org_id)
+      om.org_id::text AS org_id,
+      u.email AS email,
+      om.user_id::text AS user_id
+    FROM org_memberships om
+    JOIN users u ON u.id = om.user_id
+    JOIN gbp_connections c ON c.org_id = om.org_id
+    WHERE u.email IS NOT NULL
+    ORDER BY om.org_id, om.created_at DESC
+  `;
 
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-    const notifier = await getNotifier();
-    let sent = 0;
+  let sent = 0;
+  const errors: Array<{ orgId: string; message: string }> = [];
 
-    for (const row of orgRows) {
-      const digest = await buildWeeklyDigest(row.org_id, baseUrl);
-      await notifier.sendTransactional({
-        orgId: digest.orgId,
-        channel: "email",
-        template: "gbp_weekly_digest",
-        subject: digest.subject,
-        body: digest.body,
-        actionUrl: digest.approveUrl,
-        metadata: {
-          reconnectUrl: digest.reconnectUrl,
-          cronSecretPresent: Boolean(cronSecret),
-        },
+  for (const row of recipients.rows) {
+    try {
+      const summary = await getWeeklyDigestSummaryForOrg(row.org_id);
+      const subject = "Your weekly Google Business Profile snapshot";
+      const approveLink = summary.thisWeekPost?.approveUrl
+        ? `${process.env.NEXT_PUBLIC_APP_URL ?? ""}${summary.thisWeekPost.approveUrl}`
+        : null;
+
+      const text = [
+        "This week",
+        summary.thisWeekPost?.body ?? "Your first post goes out Thursday.",
+        "",
+        `Reviews: ${summary.reviews.answered} answered, ${summary.reviews.waiting} waiting`,
+        `Keywords: ${summary.keywords.up} up, ${summary.keywords.down} down, ${summary.keywords.flat} flat`,
+        `Connection: ${summary.connection.label}`,
+        approveLink ? `Approve: ${approveLink}` : "",
+        "",
+        getDisclosureText(),
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      await sendTransactionalEmail({
+        to: row.email,
+        subject,
+        text,
       });
-      sent += 1;
-    }
 
-    return NextResponse.json({ ok: true, sent });
-  } catch (error) {
-    console.error(JSON.stringify({ level: "error", msg: "gbp_weekly_digest_failed", error: String(error) }));
-    return NextResponse.json({ ok: false, error: "digest_failed" }, { status: 500 });
+      sent += 1;
+    } catch (error: unknown) {
+      errors.push({
+        orgId: row.org_id,
+        message: error instanceof Error ? error.message : "unknown_error",
+      });
+    }
   }
+
+  return NextResponse.json({
+    ok: true,
+    sent,
+    failed: errors.length,
+    errors,
+  });
 }

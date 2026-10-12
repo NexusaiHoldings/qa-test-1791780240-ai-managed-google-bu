@@ -331,3 +331,4 @@ CREATE INDEX IF NOT EXISTS gbp_reviews_escalation_idx
 CREATE INDEX IF NOT EXISTS gbp_reviews_location_idx
   ON gbp_reviews (location_name, reply_status);
 `;
+
