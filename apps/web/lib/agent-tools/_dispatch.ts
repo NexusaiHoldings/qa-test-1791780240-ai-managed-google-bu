@@ -37,4 +37,3 @@ export const DOMAIN_DISPATCH: Record<
   publish_gbp_post: (ctx, a) => handlePublishGbpPost(ctx, a),
   publish_review_reply: (ctx, a) => handlePublishReviewReply(ctx, a),
 };
-
