@@ -1,4 +1,13 @@
-import { Pool } from "pg";
+/**
+ * Google Business Profile HTTP client.
+ *
+ * EVERY outbound Google API call MUST flow through this module: each call is
+ * timed and written to `gbp_api_calls` (the quota ledger the operator health
+ * monitor consumes), success or failure. Uses the substrate's externalized
+ * `pg` pattern — a lazy `require("pg")` so Next's file tracer bundles the
+ * driver and preview builds without a DB still compile (pool created on first
+ * query, never at module load / build time).
+ */
 
 export type GoogleCallInput = {
   orgId?: string;
@@ -9,9 +18,32 @@ export type GoogleCallInput = {
   body?: unknown;
 };
 
-const db = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+interface PoolLike {
+  query: (
+    sql: string,
+    params?: unknown[],
+  ) => Promise<{ rows: unknown[]; rowCount: number | null }>;
+}
+
+let _pool: PoolLike | null = null;
+
+function getPool(): PoolLike {
+  if (_pool) return _pool;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Pool: PgPool } = require("pg") as {
+    Pool: new (config: Record<string, unknown>) => PoolLike;
+  };
+  _pool = new PgPool({
+    connectionString: process.env.DATABASE_URL,
+    max: 5,
+    idleTimeoutMillis: 30_000,
+  });
+  return _pool;
+}
+
+const db = {
+  query: (sql: string, params?: unknown[]) => getPool().query(sql, params),
+};
 
 async function logCall(args: {
   orgId?: string;

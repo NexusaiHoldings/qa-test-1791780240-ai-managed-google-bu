@@ -1,9 +1,43 @@
 import crypto from "crypto";
-import { Pool } from "pg";
 import { decryptRefreshToken, encryptRefreshToken } from "./token-vault";
 import { googleApiCallRaw } from "./google-client";
 
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
+interface PoolLike {
+  query: (
+    sql: string,
+    params?: unknown[],
+  ) => Promise<{ rows: unknown[]; rowCount: number | null }>;
+}
+
+let _pool: PoolLike | null = null;
+
+function getPool(): PoolLike {
+  if (_pool) return _pool;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Pool: PgPool } = require("pg") as {
+    Pool: new (config: Record<string, unknown>) => PoolLike;
+  };
+  _pool = new PgPool({
+    connectionString: process.env.DATABASE_URL,
+    max: 5,
+    idleTimeoutMillis: 30_000,
+  });
+  return _pool;
+}
+
+const db = {
+  query: (sql: string, params?: unknown[]) => getPool().query(sql, params),
+};
+
+// Account roles that permit publishing on behalf of the business. Anything else
+// (e.g. an agency that manages the listing) cannot be selected directly — the
+// owner must grant Owner/Manager access first.
+const MANAGING_ROLES = new Set([
+  "PRIMARY_OWNER",
+  "OWNER",
+  "CO_OWNER",
+  "MANAGER",
+]);
 
 const GOOGLE_SCOPE = "https://www.googleapis.com/auth/business.manage";
 
@@ -192,6 +226,94 @@ export async function refreshConnectionToken(connectionId: string): Promise<{ ac
   return { accessToken: data.access_token, expiresIn: data.expires_in };
 }
 
+// ── Verification state ──────────────────────────────────────────────────────
+
+export type GbpVerificationState =
+  | "VERIFIED"
+  | "SUSPENDED"
+  | "PENDING_VERIFICATION"
+  | "UNVERIFIED";
+
+interface VoiceOfMerchantState {
+  hasVoiceOfMerchant?: boolean;
+  hasBusinessAuthority?: boolean;
+  verify?: { hasPendingVerification?: boolean };
+  complyWithGuidelines?: { recommendationReason?: string };
+}
+
+/**
+ * Collapse Google's VoiceOfMerchantState into the single state the UI branches
+ * on. SUSPENDED / UNVERIFIED locations are still selectable but connect PAUSED;
+ * only VERIFIED locations start publishing immediately.
+ */
+function deriveVerificationState(
+  vom: VoiceOfMerchantState | null,
+): GbpVerificationState {
+  if (!vom) return "UNVERIFIED";
+  const reason = vom.complyWithGuidelines?.recommendationReason ?? "";
+  if (reason.includes("SUSPENDED") || reason.includes("DISABLED")) {
+    return "SUSPENDED";
+  }
+  if (vom.hasVoiceOfMerchant) return "VERIFIED";
+  if (vom.verify?.hasPendingVerification) return "PENDING_VERIFICATION";
+  return "UNVERIFIED";
+}
+
+async function fetchVoiceOfMerchantState(args: {
+  orgId: string;
+  connectionId: string;
+  accessToken: string;
+  locationName: string;
+}): Promise<VoiceOfMerchantState | null> {
+  try {
+    return await googleApiCallRaw<VoiceOfMerchantState>({
+      orgId: args.orgId,
+      connectionId: args.connectionId,
+      method: "GET",
+      baseUrl: "https://mybusinessverifications.googleapis.com/v1",
+      endpoint: `${args.locationName}/VoiceOfMerchantState`,
+      accessToken: args.accessToken,
+    });
+  } catch {
+    // Verification lookup is best-effort: a failure must not abort the whole
+    // location sync. The call is still logged to gbp_api_calls by the client.
+    return null;
+  }
+}
+
+async function fetchAverageRating(args: {
+  orgId: string;
+  connectionId: string;
+  accessToken: string;
+  accountName: string;
+  locationName: string;
+}): Promise<number | null> {
+  try {
+    const res = await googleApiCallRaw<{
+      averageRating?: number;
+      totalReviewCount?: number;
+    }>({
+      orgId: args.orgId,
+      connectionId: args.connectionId,
+      method: "GET",
+      baseUrl: "https://mybusiness.googleapis.com/v4",
+      endpoint: `${args.accountName}/${args.locationName}/reviews`,
+      accessToken: args.accessToken,
+    });
+    return typeof res.averageRating === "number" ? res.averageRating : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pull the owner's Business Profile accounts and locations into
+ * gbp_locations_cache, resolving the three COO edge cases per location:
+ *   - role that can't manage the listing  → is_selectable=false ("agency_managed")
+ *   - suspended / unverified listing       → selectable, but flagged so selection pauses
+ *   - (zero locations)                     → nothing cached; the page shows "claim your profile"
+ * Every Google call routes through google-client.ts and lands in gbp_api_calls.
+ */
 export async function fetchAccountsAndLocations(orgId: string): Promise<void> {
   const connRes = await db.query(
     `SELECT id, access_token FROM gbp_connections WHERE org_id = $1 LIMIT 1`,
@@ -201,7 +323,9 @@ export async function fetchAccountsAndLocations(orgId: string): Promise<void> {
   const conn = connRes.rows[0] as { id: string; access_token: string | null };
   if (!conn.access_token) throw new Error("access_token_missing");
 
-  const accounts = await googleApiCallRaw<{ accounts?: Array<{ name: string }> }>({
+  const accounts = await googleApiCallRaw<{
+    accounts?: Array<{ name: string; accountName?: string; role?: string }>;
+  }>({
     orgId,
     connectionId: conn.id,
     method: "GET",
@@ -213,13 +337,18 @@ export async function fetchAccountsAndLocations(orgId: string): Promise<void> {
   await db.query(`DELETE FROM gbp_locations_cache WHERE org_id = $1`, [orgId]);
 
   for (const account of accounts.accounts ?? []) {
+    const role = account.role ?? "UNKNOWN";
+    const canManage = MANAGING_ROLES.has(role);
+
+    const readMask =
+      "name,title,storefrontAddress,categories,metadata,phoneNumbers,websiteUri";
     const locations = await googleApiCallRaw<{
       locations?: Array<{
         name: string;
         title?: string;
         storefrontAddress?: unknown;
         metadata?: { mapsUri?: string };
-        profile?: { description?: string };
+        categories?: { primaryCategory?: { displayName?: string } };
         primaryCategory?: { displayName?: string };
       }>;
     }>({
@@ -227,17 +356,42 @@ export async function fetchAccountsAndLocations(orgId: string): Promise<void> {
       connectionId: conn.id,
       method: "GET",
       baseUrl: "https://mybusinessbusinessinformation.googleapis.com/v1",
-      endpoint: `${account.name}/locations`,
+      endpoint: `${account.name}/locations?readMask=${encodeURIComponent(readMask)}`,
       accessToken: conn.access_token,
     });
 
     for (const loc of locations.locations ?? []) {
+      const vom = await fetchVoiceOfMerchantState({
+        orgId,
+        connectionId: conn.id,
+        accessToken: conn.access_token,
+        locationName: loc.name,
+      });
+      const verificationState = deriveVerificationState(vom);
+
+      const averageRating = await fetchAverageRating({
+        orgId,
+        connectionId: conn.id,
+        accessToken: conn.access_token,
+        accountName: account.name,
+        locationName: loc.name,
+      });
+
+      const primaryCategory =
+        loc.categories?.primaryCategory?.displayName ??
+        loc.primaryCategory?.displayName ??
+        null;
+
+      const isSelectable = canManage;
+      const selectableReason = canManage ? null : "agency_managed";
+
       await db.query(
         `INSERT INTO gbp_locations_cache
          (org_id, account_name, location_name, title, metadata, primary_category_display_name, verification_state, average_rating, user_role, is_selectable, selectable_reason, updated_at)
          VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,NOW())
          ON CONFLICT (org_id, location_name) DO UPDATE
-         SET title = EXCLUDED.title,
+         SET account_name = EXCLUDED.account_name,
+             title = EXCLUDED.title,
              metadata = EXCLUDED.metadata,
              primary_category_display_name = EXCLUDED.primary_category_display_name,
              verification_state = EXCLUDED.verification_state,
@@ -251,13 +405,13 @@ export async function fetchAccountsAndLocations(orgId: string): Promise<void> {
           account.name,
           loc.name,
           loc.title ?? loc.name,
-          JSON.stringify(loc),
-          loc.primaryCategory?.displayName ?? null,
-          "VERIFIED",
-          null,
-          "OWNER",
-          true,
-          null,
+          JSON.stringify({ ...loc, mapsUri: loc.metadata?.mapsUri ?? null }),
+          primaryCategory,
+          verificationState,
+          averageRating,
+          role,
+          isSelectable,
+          selectableReason,
         ],
       );
     }

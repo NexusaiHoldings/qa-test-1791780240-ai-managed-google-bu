@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { consumeOAuthState, exchangeCodeForToken, fetchAccountsAndLocations, upsertConnectionFromOAuth } from "@/lib/gbp/oauth";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
